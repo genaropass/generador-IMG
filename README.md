@@ -2,7 +2,7 @@
 
 Generador de imágenes histopatológicas sintéticas mediante deformación elástica fractal y augmentación de tinción.
 
-## 🛠️ Requisitos e Instalación
+## Requisitos e Instalación
 
 ### 1. Activar el entorno virtual
 
@@ -37,7 +37,7 @@ pip install -r requirements.txt
 
 ---
 
-## 📁 Archivos del Proyecto
+## Archivos del Proyecto
 
 ```text
 generador/
@@ -54,7 +54,7 @@ generador/
 
 ---
 
-## 🖥️ Uso — Interfaz Web (Recomendado)
+## Uso — Interfaz Web (Recomendado)
 
 1. Abre una terminal y muévete a la carpeta `scripts`:
 ```bash
@@ -68,7 +68,7 @@ python -m streamlit run app.py
 
 ---
 
-## ⚙️ Uso — Línea de Comandos
+## Uso — Línea de Comandos
 
 Ideal para procesar imágenes masivamente sin interfaz:
 ```bash
@@ -79,7 +79,7 @@ python synthetic_pipeline.py
 
 ---
 
-## 📦 Estructura del Dataset Generado
+## Estructura del Dataset Generado
 
 Las imágenes se guardan automáticamente en `generador/scripts/output_sintetico_v2/dataset_sintetico/`. Cada variante incluye:
 - `imagen_syn00.png` → La imagen WSI deformada limpia.
