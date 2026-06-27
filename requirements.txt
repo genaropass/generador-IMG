@@ -6,3 +6,5 @@ Pillow>=10.0.0
 matplotlib>=3.7.0
 ultralytics>=8.1.0
 scikit-image>=0.19.3
+torch
+torchvision
