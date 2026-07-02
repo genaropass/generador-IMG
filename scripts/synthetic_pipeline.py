@@ -15,7 +15,10 @@ import numpy as np
 import cv2
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import torch
 from PIL import Image
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
 
@@ -23,8 +26,8 @@ warnings.filterwarnings("ignore")
 sys.path.insert(0, os.path.dirname(__file__))
 
 from fractal_field       import build_elastic_field, apply_elastic_deformation, transform_coordinates, lacunarity_color_scale
-from macenko             import separate_stains, augment_staining
-from fractal_characterizer import compute_fractal_dimension, compute_lacunarity
+from macenko             import separate_stains, augment_staining, reconstruct_from_stains
+from fractal_characterizer import compute_fractal_dimension, compute_lacunarity, compute_minkowski_and_zeta
 
 # ─── Constantes configurables ──────────────────────────────────────────────
 ALPHA         = 35      # Intensidad de deformacion elastica
@@ -94,7 +97,7 @@ def segment_with_sam2(image_rgb, candidates, model_name="sam2.1_t.pt"):
     Retorna lista de (mask_uint8, cx, cy).
     """
     from ultralytics import SAM
-    model = SAM(model_name)
+    model = SAM(model_name).to(DEVICE)
 
     H, W = image_rgb.shape[:2]
     results_list = []
@@ -117,6 +120,7 @@ def segment_with_sam2(image_rgb, candidates, model_name="sam2.1_t.pt"):
                 source=patch,
                 points=[[local_cx, local_cy]],
                 labels=[1],
+                device=DEVICE,
                 verbose=False
             )
         except Exception:
@@ -150,14 +154,19 @@ def segment_with_sam2(image_rgb, candidates, model_name="sam2.1_t.pt"):
 
 def characterize_cells(masks_with_coords):
     """
-    Calcula D_f y Lacunaridad para cada celula.
-    Retorna lista de (mask, cx, cy, df, lacunarity).
+    Calcula D_f, Lacunaridad y Minkowski para cada celula.
+    Retorna lista de (mask, cx, cy, df, lacunarity, minkowski_dim, upper_minkowski, lower_minkowski, minkowski_lacunarity, complex_omega, complex_amplitude).
     """
     characterized = []
     for (mask, cx, cy) in masks_with_coords:
         df, _ = compute_fractal_dimension(mask)
         lac, _ = compute_lacunarity(mask)
-        characterized.append((mask, cx, cy, df, lac))
+        mz = compute_minkowski_and_zeta(mask)
+        characterized.append((
+            mask, cx, cy, df, lac,
+            mz["minkowski_dim"], mz["upper_minkowski"], mz["lower_minkowski"],
+            mz["minkowski_lacunarity"], mz["complex_omega"], mz["complex_amplitude"]
+        ))
 
     if characterized:
         dfs = [c[3] for c in characterized]
@@ -169,12 +178,13 @@ def characterize_cells(masks_with_coords):
 # ETAPA D+E: CAMPO ELASTICO + DEFORMACION COMPLETA
 # ==========================================================================
 
-def generate_synthetic_wsi(image_rgb, characterized_cells, variant_idx=0):
+def generate_synthetic_wsi(image_rgb, characterized_cells, variant_idx=0, grade="3+"):
     """
     Genera UNA variante sintetica de la WSI completa.
     Combina:
       - Campo elastico fBm + Weierstrass ponderado por D_f  (Etapa D)
       - cv2.remap sobre imagen completa                     (Etapa E)
+      - Simulacion de gaps locales de membrana (HER2 1+/2+) e intensidad
       - Augmentacion Macenko global                         (Etapa F)
     Retorna: (imagen_sintetica_rgb, nuevas_coords, dx, dy)
     """
@@ -182,8 +192,8 @@ def generate_synthetic_wsi(image_rgb, characterized_cells, variant_idx=0):
     seed  = 1000 + variant_idx * 137
 
     # Preparar lista (mask, df) para el campo
-    masks_df = [(m, df) for (m, cx, cy, df, lac) in characterized_cells]
-    coords   = [(cx, cy) for (_, cx, cy, _, _) in characterized_cells]
+    masks_df = [(c[0], c[3]) for c in characterized_cells]
+    coords   = [(c[1], c[2]) for c in characterized_cells]
 
     # ── Etapa D: Campo elastico ───────────────────────────────────────────
     map_x, map_y, dx, dy = build_elastic_field(
@@ -199,20 +209,90 @@ def generate_synthetic_wsi(image_rgb, characterized_cells, variant_idx=0):
     # ── Etapa E: Deformacion completa ─────────────────────────────────────
     warped_rgb = apply_elastic_deformation(image_rgb, map_x, map_y)
 
-    # ── Etapa F: Macenko augmentation ─────────────────────────────────────
-    # La variacion de color usa la Lacunaridad media como modulador
-    mean_lac = np.mean([lac for (_, _, _, _, lac) in characterized_cells]) if characterized_cells else 1.5
+    # ── Simulación de Gaps Locales de Membrana (HER2 0, 1+, 2+) ───────────
+    global_gap_mask = np.ones((H, W), dtype=np.float32)
+    rng = np.random.default_rng(seed + 99)
+
+    if grade != "3+":
+        for cell in characterized_cells:
+            mask_orig = cell[0]
+            
+            # Deformar la máscara de la célula para alinearla con el tejido
+            warped_mask = cv2.remap(mask_orig, map_x, map_y, cv2.INTER_NEAREST, 
+                                    borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            
+            ys, xs = np.where(warped_mask > 0)
+            if len(xs) == 0:
+                continue
+            
+            cx_new = np.mean(xs)
+            cy_new = np.mean(ys)
+            
+            if grade == "0":
+                # HER2 0: Borrar completamente la tinción de la membrana
+                global_gap_mask[warped_mask > 0] = 0.0
+            else:
+                # HER2 1+ y 2+: Generar arcos de discontinuidad (gaps)
+                num_gaps = rng.integers(1, 4)
+                # 1+ tiene gaps más severos (60-80% de la membrana borrada)
+                # 2+ tiene gaps moderados (20-40% de la membrana borrada)
+                gap_ratio = rng.uniform(0.60, 0.80) if grade == "1+" else rng.uniform(0.20, 0.40)
+                
+                gap_angles = []
+                total_width = 0.0
+                target_total_width = gap_ratio * 2.0 * np.pi
+                
+                while total_width < target_total_width:
+                    start_angle = rng.uniform(-np.pi, np.pi)
+                    width = rng.uniform(np.radians(10), np.radians(90))
+                    if total_width + width > target_total_width:
+                        width = target_total_width - total_width
+                    gap_angles.append((start_angle, start_angle + width))
+                    total_width += width
+                    
+                # Aplicar atenuación local en los ángulos calculados
+                for y, x in zip(ys, xs):
+                    theta = np.arctan2(y - cy_new, x - cx_new)
+                    in_gap = False
+                    for start, end in gap_angles:
+                        t = theta
+                        while t < start:
+                            t += 2.0 * np.pi
+                        if start <= t <= end:
+                            in_gap = True
+                            break
+                    if in_gap:
+                        global_gap_mask[y, x] = rng.uniform(0.0, 0.15) # Fading fuerte del DAB
+
+    # ── Etapa F: Macenko color + Gaps + Intensidad de Grado HER2 ──────────
+    concentrations, od = separate_stains(warped_rgb)
+
+    mean_lac = np.mean([c[4] for c in characterized_cells]) if characterized_cells else 1.5
     h_s, dab_s = lacunarity_color_scale(mean_lac, base_dab_scale=1.0)
 
-    rng = np.random.default_rng(seed)
+    # Coeficientes específicos del grado de tinción HER2
+    grade_dab_scale = 1.0
+    if grade == "0":
+        grade_dab_scale = rng.uniform(0.0, 0.05)
+    elif grade == "1+":
+        grade_dab_scale = rng.uniform(0.15, 0.35)
+    elif grade == "2+":
+        grade_dab_scale = rng.uniform(0.45, 0.75)
+    elif grade == "3+":
+        grade_dab_scale = rng.uniform(1.0, 1.4)
+
     h_scale   = h_s   * rng.uniform(0.85, 1.15)
-    dab_scale = dab_s * rng.uniform(0.80, 1.20)
+    dab_scale = dab_s * rng.uniform(0.80, 1.20) * grade_dab_scale
     bright    = rng.uniform(0.92, 1.08)
 
-    synthetic_rgb = augment_staining(warped_rgb,
-                                     h_scale=h_scale,
-                                     dab_scale=dab_scale,
-                                     brightness_scale=bright)
+    # Escalar H (nucleos) y DAB (membranas con gaps)
+    concentrations[:, :, 0] = concentrations[:, :, 0] * h_scale
+    concentrations[:, :, 1] = concentrations[:, :, 1] * dab_scale * global_gap_mask
+    concentrations = np.clip(concentrations, 0, None)
+
+    # Reconstrucción de la imagen RGB
+    synthetic_rgb = reconstruct_from_stains(concentrations)
+    synthetic_rgb = np.clip(synthetic_rgb.astype(np.float64) * bright, 0, 255).astype(np.uint8)
 
     # Transformar coordenadas con el mismo campo
     new_coords = transform_coordinates(coords, dx, dy, (H, W))
@@ -253,12 +333,20 @@ def save_variant(output_dir, base_name, variant_idx, synthetic_rgb,
     csv_path = os.path.join(output_dir, f"{sid}_labels.csv")
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["x", "y", "df_original", "lacunarity"])
+        writer.writerow([
+            "x", "y", "df_original", "lacunarity", 
+            "minkowski_dim", "upper_minkowski", "lower_minkowski", 
+            "minkowski_lacunarity", "complex_omega", "complex_amplitude"
+        ])
         for (coord, cell) in zip(new_coords, characterized_cells):
             x_new, y_new = coord
-            _, _, _, df, lac = cell
-            writer.writerow([round(x_new, 2), round(y_new, 2),
-                             round(df, 4), round(lac, 4)])
+            df, lac, m_d, u_m, l_m, m_l, c_w, c_a = cell[3:]
+            writer.writerow([
+                round(x_new, 2), round(y_new, 2),
+                round(df, 4), round(lac, 4),
+                round(m_d, 4), round(u_m, 4), round(l_m, 4),
+                round(m_l, 4), round(c_w, 4), round(c_a, 4)
+            ])
 
     # Campo de deformacion (para reproducibilidad)
     field_path = os.path.join(output_dir, f"{sid}_warpfield.npz")
@@ -306,7 +394,7 @@ def save_comparison(original_rgb, variants, output_path, base_name):
 # PIPELINE PRINCIPAL
 # ==========================================================================
 
-def run(image_path, output_dir, n_variants=N_VARIANTS, alpha=ALPHA, draw_points=False):
+def run(image_path, output_dir, n_variants=N_VARIANTS, alpha=ALPHA, grade="3+", draw_points=False):
     """
     Ejecuta el pipeline completo A→F sobre una imagen WSI.
     """
@@ -350,7 +438,7 @@ def run(image_path, output_dir, n_variants=N_VARIANTS, alpha=ALPHA, draw_points=
     for vi in range(n_variants):
         print(f"  [Etapas D-E-F] Generando variante {vi+1}/{n_variants}...")
         synth_rgb, new_coords, dx, dy = generate_synthetic_wsi(
-            image_rgb, characterized, variant_idx=vi
+            image_rgb, characterized, variant_idx=vi, grade=grade
         )
 
         sid, img_path = save_variant(
@@ -373,6 +461,6 @@ def run(image_path, output_dir, n_variants=N_VARIANTS, alpha=ALPHA, draw_points=
 
 
 if __name__ == "__main__":
-    IMAGE  = r"E:\Genaro\Desktop\Digital pathologies\no entrar\scripts\3+\3+\3Her2.jpg"
-    OUTPUT = r"E:\Genaro\Desktop\Digital pathologies\no entrar\output_sintetico_v2"
+    IMAGE  = r"E:\Genaro\Desktop\Digital pathologies\generador\scripts\3+\3+\3Her2.jpg"
+    OUTPUT = r"E:\Genaro\Desktop\Digital pathologies\generador\output_sintetico_v2"
     run(IMAGE, OUTPUT, n_variants=3, alpha=35)

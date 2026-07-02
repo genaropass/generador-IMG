@@ -17,6 +17,8 @@ import json
 import os
 import matplotlib.pyplot as plt
 import sys
+from scipy.ndimage import distance_transform_edt
+from scipy.optimize import curve_fit
 sys.path.insert(0, os.path.dirname(__file__))
 from macenko import separate_stains
 
@@ -154,6 +156,98 @@ def compute_lacunarity(mask_binary, box_sizes=None):
 
 
 # =============================================================================
+# CONTENIDO DE MINKOWSKI Y FUNCIÓN ZETA TUBULAR (DIMENSIONES COMPLEJAS)
+# =============================================================================
+
+def compute_minkowski_and_zeta(mask_binary, r_max=15):
+    """
+    Calcula el Contenido de Minkowski Superior e Inferior, la Lacunaridad de Minkowski,
+    y estima los polos complejos de la función zeta tubular ajustando un modelo oscilatorio
+    sobre la frontera de la máscara binaria.
+    """
+    # 1. Obtener la frontera de la máscara (membrana)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    eroded = cv2.erode(mask_binary, kernel, iterations=1)
+    boundary = cv2.subtract(mask_binary, eroded)
+    
+    if np.sum(boundary > 0) == 0:
+        return {
+            "minkowski_dim": 1.0,
+            "upper_minkowski": 1.0,
+            "lower_minkowski": 1.0,
+            "minkowski_lacunarity": 0.0,
+            "complex_omega": 0.0,
+            "complex_amplitude": 0.0
+        }
+    
+    # 2. Transformada de Distancia Euclidiana (EDT) a la frontera
+    dist_map = distance_transform_edt(boundary == 0)
+    
+    # 3. Medir el volumen tubular V(A_r) para r = 1, 2, ..., r_max
+    radii = np.arange(1, r_max + 1, dtype=np.float64)
+    volumes = np.zeros_like(radii)
+    for i, r in enumerate(radii):
+        volumes[i] = np.sum(dist_map <= r)
+        
+    # 4. Ajustar V(A_r) = c * r^(2-D) en escala log-log para la Dimensión de Minkowski D
+    log_r = np.log(radii)
+    log_v = np.log(volumes + 1e-9)
+    
+    coeffs = np.polyfit(log_r, log_v, 1)
+    slope = coeffs[0]
+    D = 2.0 - slope
+    D = max(1.0, min(2.0, float(D)))
+    
+    # 5. Calcular la serie de contenido local de Minkowski M(r) = V(A_r) / r^(2-D)
+    exponent = 2.0 - D
+    m_r = volumes / (radii ** exponent + 1e-9)
+    
+    # 6. Extraer contenido superior e inferior para radios estables r >= 2
+    stable_m = m_r[1:] if len(m_r) > 1 else m_r
+    upper_M = float(np.max(stable_m))
+    lower_M = float(np.min(stable_m))
+    mink_lac = upper_M - lower_M
+    
+    # 7. Ajustar el modelo oscilatorio para estimar la dimensión compleja
+    # M(r) = a + b * cos(omega * ln(r) + phase)
+    def osc_model(r, a, b, omega, phase):
+        return a + b * np.cos(omega * np.log(r) + phase)
+    
+    a_init = np.mean(stable_m)
+    b_init = (upper_M - lower_M) / 2.0
+    omega_init = 1.0
+    phase_init = 0.0
+    
+    p0 = [a_init, b_init, omega_init, phase_init]
+    
+    bounds = (
+        [0.0, 0.0, 0.0, -np.pi],
+        [np.inf, np.inf, 20.0, np.pi]
+    )
+    
+    omega = 0.0
+    amplitude = 0.0
+    try:
+        fit_r = radii[1:] if len(radii) > 1 else radii
+        fit_m = stable_m
+        popt, _ = curve_fit(osc_model, fit_r, fit_m, p0=p0, bounds=bounds, maxfev=2000)
+        a_fit, b_fit, omega_fit, phase_fit = popt
+        omega = float(omega_fit)
+        amplitude = float(b_fit)
+    except Exception:
+        pass
+        
+    return {
+        "minkowski_dim": round(D, 6),
+        "upper_minkowski": round(upper_M, 6),
+        "lower_minkowski": round(lower_M, 6),
+        "minkowski_lacunarity": round(mink_lac, 6),
+        "complex_omega": round(omega, 6),
+        "complex_amplitude": round(amplitude, 6)
+    }
+
+
+# =============================================================================
 # CARACTERÍSTICAS DE TEXTURA Y TINCIÓN (HER2)
 # =============================================================================
 
@@ -210,17 +304,26 @@ def characterize_cell(cell_data):
     # 3. Lacunaridad
     lac, lac_details = compute_lacunarity(mask)
     
+    # 3.1 Minkowski y Zetas (Dimensiones Complejas)
+    mink_zeta = compute_minkowski_and_zeta(mask)
+    
     # 4. Tinción
     stain = compute_staining_features(cell_rgb, mask)
     
     vector = {
-        "id":              cell_data["id"],
-        "global_x":        cell_data.get("global_x", 0),
-        "global_y":        cell_data.get("global_y", 0),
-        "geometric":       geo,
-        "fractal_dimension": df,
-        "lacunarity":      lac,
-        "staining":        stain,
+        "id":                 cell_data["id"],
+        "global_x":           cell_data.get("global_x", 0),
+        "global_y":           cell_data.get("global_y", 0),
+        "geometric":          geo,
+        "fractal_dimension":  df,
+        "lacunarity":         lac,
+        "minkowski_dim":      mink_zeta["minkowski_dim"],
+        "upper_minkowski":    mink_zeta["upper_minkowski"],
+        "lower_minkowski":    mink_zeta["lower_minkowski"],
+        "minkowski_lacunarity": mink_zeta["minkowski_lacunarity"],
+        "complex_omega":      mink_zeta["complex_omega"],
+        "complex_amplitude":  mink_zeta["complex_amplitude"],
+        "staining":           stain,
         "_details": {
             "box_counting": df_details,
             "lacunarity":   lac_details
