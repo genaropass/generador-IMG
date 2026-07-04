@@ -223,3 +223,42 @@ def transform_coordinates(coords_xy, dx, dy, image_shape):
         y_new = float(np.clip(y + dy[yi, xi], 0, H - 1))
         new_coords.append((x_new, y_new))
     return new_coords
+
+# =============================================================================
+# 6. GENERADORES DE RUIDO Y TEXTURA PARA COLOR
+# =============================================================================
+
+def generate_spatial_heterogeneity_map(H, W, seed=None, scale_variance=0.15):
+    """
+    Genera un mapa de heterogeneidad de baja frecuencia (suave) para simular
+    variaciones biológicas en la absorción del colorante a gran escala.
+    Retorna un mapa centrado en 1.0 (ej. 0.85 a 1.15).
+    """
+    rng = np.random.default_rng(seed)
+    # Ruido blanco de muy baja resolucion, luego escalado y suavizado
+    h_small, w_small = max(2, H // 64), max(2, W // 64)
+    noise = rng.standard_normal((h_small, w_small)).astype(np.float32)
+    noise_large = cv2.resize(noise, (W, H), interpolation=cv2.INTER_CUBIC)
+    
+    # Normalizar a varianza 1 y aplicar escala deseada
+    if noise_large.std() > 0:
+        noise_large = noise_large / noise_large.std()
+    
+    mapa = 1.0 + (noise_large * scale_variance)
+    return np.clip(mapa, 1.0 - scale_variance * 2, 1.0 + scale_variance * 2)
+
+def generate_microtexture_noise(H, W, seed=None, intensity=0.08):
+    """
+    Genera ruido de alta frecuencia (granulado fino) para simular la microtextura 
+    de la membrana celular y evitar el aspecto "plástico".
+    Retorna un mapa centrado en 1.0.
+    """
+    rng = np.random.default_rng(seed)
+    noise = rng.standard_normal((H, W)).astype(np.float32)
+    noise = gaussian_filter(noise, sigma=1.0) # Ligero suavizado para evitar ruido de un solo pixel puro
+    
+    if noise.std() > 0:
+        noise = noise / noise.std()
+        
+    mapa = 1.0 + (noise * intensity)
+    return np.clip(mapa, 1.0 - intensity * 3, 1.0 + intensity * 3)

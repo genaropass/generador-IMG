@@ -25,7 +25,7 @@ ssl._create_default_https_context = ssl._create_unverified_context
 warnings.filterwarnings("ignore")
 sys.path.insert(0, os.path.dirname(__file__))
 
-from fractal_field       import build_elastic_field, apply_elastic_deformation, transform_coordinates, lacunarity_color_scale
+from fractal_field       import build_elastic_field, apply_elastic_deformation, transform_coordinates, lacunarity_color_scale, generate_spatial_heterogeneity_map, generate_microtexture_noise
 from macenko             import separate_stains, augment_staining, reconstruct_from_stains, calibrate_reference, IHC_REFERENCE, HE_REFERENCE
 from fractal_characterizer import compute_fractal_dimension, compute_lacunarity, compute_minkowski_and_zeta
 
@@ -282,6 +282,10 @@ def generate_synthetic_wsi(image_rgb, characterized_cells, variant_idx=0, grade=
     mean_lac = np.mean([c[4] for c in characterized_cells]) if characterized_cells else 1.5
     h_s, dab_s = lacunarity_color_scale(mean_lac, base_dab_scale=1.0)
 
+    # Generar mapas de ruido biológico para esta variante
+    hetero_map = generate_spatial_heterogeneity_map(H, W, seed=seed+50, scale_variance=0.15)
+    micro_tex  = generate_microtexture_noise(H, W, seed=seed+60, intensity=0.12)
+
     # Coeficientes específicos del grado de tinción HER2
     grade_dab_scale = 1.0
     if grade == "0":
@@ -293,18 +297,28 @@ def generate_synthetic_wsi(image_rgb, characterized_cells, variant_idx=0, grade=
     elif grade == "3+":
         grade_dab_scale = rng.uniform(1.0, 1.4)
 
+    # Variabilidad global base
     h_scale   = h_s   * rng.uniform(0.85, 1.15)
     dab_scale = dab_s * rng.uniform(0.80, 1.20) * grade_dab_scale
     bright    = rng.uniform(0.92, 1.08)
 
-    # Escalar H (nucleos) y DAB (membranas con gaps)
-    concentrations[:, :, 0] = concentrations[:, :, 0] * h_scale
-    concentrations[:, :, 1] = concentrations[:, :, 1] * dab_scale * global_gap_mask
+    # Escalar H (nucleos) y DAB (membranas con gaps + textura)
+    # Aplicar la variabilidad espacial a ambos, y la microtextura solo al DAB
+    concentrations[:, :, 0] = concentrations[:, :, 0] * h_scale * hetero_map
+    concentrations[:, :, 1] = concentrations[:, :, 1] * dab_scale * global_gap_mask * hetero_map * micro_tex
     concentrations = np.clip(concentrations, 0, None)
 
     # Reconstruccion calibrada
     synthetic_rgb = reconstruct_from_stains(concentrations, reference=stain_ref)
-    synthetic_rgb = np.clip(synthetic_rgb.astype(np.float64) * bright, 0, 255).astype(np.uint8)
+    
+    # Ruido de escáner (sensor noise) y viñeta sutil
+    synth_float = synthetic_rgb.astype(np.float64) * bright
+    
+    # Ruido de Poisson simulado / Gaussiano
+    scanner_noise = rng.normal(0, 3.0, synth_float.shape)
+    synth_float = synth_float + scanner_noise
+    
+    synthetic_rgb = np.clip(synth_float, 0, 255).astype(np.uint8)
 
     # Transformar coordenadas con el mismo campo
     new_coords = transform_coordinates(coords, dx, dy, (H, W))
