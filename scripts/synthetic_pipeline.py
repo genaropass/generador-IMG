@@ -178,7 +178,7 @@ def characterize_cells(masks_with_coords):
 # ETAPA D+E: CAMPO ELASTICO + DEFORMACION COMPLETA
 # ==========================================================================
 
-def generate_synthetic_wsi(image_rgb, characterized_cells, variant_idx=0, grade="3+", stain_type="ihc"):
+def generate_synthetic_wsi(image_rgb, characterized_cells, stain_ref, variant_idx=0, grade="3+"):
     """
     Genera UNA variante sintetica de la WSI completa.
     Combina:
@@ -275,8 +275,6 @@ def generate_synthetic_wsi(image_rgb, characterized_cells, variant_idx=0, grade=
                         global_gap_mask[y, x] = rng.uniform(0.0, 0.15) # Fading fuerte del DAB
 
     # ── Etapa F: Macenko calibrado por tipo de tincion + Gaps ─────────────
-    # Calibrar la referencia desde la imagen real del usuario
-    stain_ref = calibrate_reference(image_rgb) if stain_type == "ihc" else HE_REFERENCE
     concentrations, od = separate_stains(warped_rgb, reference=stain_ref)
 
     mean_lac = np.mean([c[4] for c in characterized_cells]) if characterized_cells else 1.5
@@ -311,11 +309,11 @@ def generate_synthetic_wsi(image_rgb, characterized_cells, variant_idx=0, grade=
     # Reconstruccion calibrada
     synthetic_rgb = reconstruct_from_stains(concentrations, reference=stain_ref)
     
-    # Ruido de escáner (sensor noise) y viñeta sutil
+    # Ruido de escáner (sensor noise) ultrarrápido
     synth_float = synthetic_rgb.astype(np.float64) * bright
     
-    # Ruido de Poisson simulado / Gaussiano
-    scanner_noise = rng.normal(0, 3.0, synth_float.shape)
+    scanner_noise = np.zeros(synth_float.shape, dtype=np.float64)
+    cv2.randn(scanner_noise, 0.0, 3.0)
     synth_float = synth_float + scanner_noise
     
     synthetic_rgb = np.clip(synth_float, 0, 255).astype(np.uint8)
@@ -459,10 +457,14 @@ def run(image_path, output_dir, n_variants=N_VARIANTS, alpha=ALPHA, grade="3+", 
 
     # D+E+F: Generar N variantes
     variants_info = []
+    
+    # Calibrar color SOLO UNA VEZ para toda la imagen (optimización de velocidad)
+    stain_ref = calibrate_reference(image_rgb) if stain_type == "ihc" else HE_REFERENCE
+    
     for vi in range(n_variants):
         print(f"  [Etapas D-E-F] Generando variante {vi+1}/{n_variants}...")
         synth_rgb, new_coords, dx, dy = generate_synthetic_wsi(
-            image_rgb, characterized, variant_idx=vi, grade=grade, stain_type=stain_type
+            image_rgb, characterized, stain_ref, variant_idx=vi, grade=grade
         )
 
         sid, img_path = save_variant(

@@ -50,6 +50,12 @@ def calibrate_reference(image_rgb, percentile=99):
     od_tissue = od_flat[mask]
     if len(od_tissue) < 100:
         return IHC_REFERENCE  # fallback
+    # Para que SVD sea muy rapido en imagenes grandes, sub-muestreamos aleatoriamente
+    # a 10,000 pixeles. El PCA de los colores sera matematicamente identico.
+    if len(od_tissue) > 10000:
+        indices = np.random.choice(len(od_tissue), 10000, replace=False)
+        od_tissue = od_tissue[indices]
+
     # PCA para encontrar los dos vectores principales de color
     od_mean = od_tissue.mean(axis=0)
     _, _, Vt = np.linalg.svd(od_tissue - od_mean, full_matrices=False)
