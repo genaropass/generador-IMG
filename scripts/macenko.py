@@ -24,10 +24,42 @@ import os
 # para Hematoxilina y DAB en el espacio de densidad óptica (OD).
 # Referencia: Macenko et al., ISBI 2009.
 
+# H&E estándar
 HE_REFERENCE = np.array([
-    [0.5626, 0.7201, 0.4062],   # Vector de absorbancia H (Hematoxilina)
-    [0.2159, 0.8012, 0.5581]    # Vector de absorbancia E (DAB / Eosina)
+    [0.5626, 0.7201, 0.4062],
+    [0.2159, 0.8012, 0.5581]
 ])
+
+# IHC / Inmunomarcación (Hematoxilina + DAB)
+IHC_REFERENCE = np.array([
+    [0.6500, 0.7040, 0.2860],   # Hematoxilina azul/violeta
+    [0.2680, 0.5700, 0.7760]    # DAB marrón dorado
+])
+
+
+def calibrate_reference(image_rgb, percentile=99):
+    """
+    Calibra automáticamente la matriz de referencia Macenko
+    a partir de los píxeles más teñidos de la imagen real.
+    Usa PCA sobre los píxeles OD con alta absorbancia.
+    """
+    od = rgb_to_od(image_rgb)
+    od_flat = od.reshape(-1, 3)
+    # Solo usar píxeles con absorbancia suficiente (no fondo blanco)
+    mask = np.linalg.norm(od_flat, axis=1) > 0.15
+    od_tissue = od_flat[mask]
+    if len(od_tissue) < 100:
+        return IHC_REFERENCE  # fallback
+    # PCA para encontrar los dos vectores principales de color
+    od_mean = od_tissue.mean(axis=0)
+    _, _, Vt = np.linalg.svd(od_tissue - od_mean, full_matrices=False)
+    # Los dos primeros vectores singulares son los ejes de tinción
+    ref = Vt[:2]
+    # Normalizar para que apunten hacia densidades positivas
+    for i in range(2):
+        if ref[i].sum() < 0:
+            ref[i] *= -1
+    return ref
 
 
 # =============================================================================
@@ -110,7 +142,8 @@ def augment_staining(
     dab_scale=1.0,
     h_shift=0.0,
     dab_shift=0.0,
-    brightness_scale=1.0
+    brightness_scale=1.0,
+    stain_type="ihc"
 ):
     """
     Aplica variaciones controladas de tincion sobre una imagen HER2.
@@ -125,7 +158,8 @@ def augment_staining(
     Retorna:
         Imagen sintética RGB augmentada.
     """
-    concentrations, _ = separate_stains(image_rgb)
+    ref = IHC_REFERENCE if stain_type == "ihc" else HE_REFERENCE
+    concentrations, _ = separate_stains(image_rgb, reference=ref)
 
     # Alterar concentraciones de cada canal independientemente
     synthetic_conc = concentrations.copy()
@@ -136,7 +170,7 @@ def augment_staining(
     synthetic_conc = np.clip(synthetic_conc, 0, None)
 
     # Reconstruir imagen
-    synthetic_rgb = reconstruct_from_stains(synthetic_conc)
+    synthetic_rgb = reconstruct_from_stains(synthetic_conc, reference=ref)
 
     # Aplicar factor de brillo global (simula temperatura de luz del escaner)
     synthetic_rgb = np.clip(

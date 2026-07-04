@@ -41,7 +41,10 @@ with col_in:
     st.subheader("Parametros de Entrada")
 
     uploaded = st.file_uploader("Imagen de tejido (JPEG / PNG)", type=["jpg", "jpeg", "png"])
-    grade    = st.selectbox("Grado HER2", ["0", "1+", "2+", "3+"], index=3)
+    grade      = st.selectbox("Grado HER2", ["0", "1+", "2+", "3+"], index=3)
+    stain_type = st.selectbox("Tipo de tincion", ["IHC / Inmunomarcacion (HER2)", "H&E (Hematoxilina y Eosina)"],
+                              help="IHC: calibra automaticamente los colores de DAB y Hematoxilina desde tu imagen. H&E: usa la matriz estandar de Hematoxilina y Eosina.")
+    stain_key  = "ihc" if stain_type.startswith("IHC") else "he"
     n_var    = st.slider("Variantes sinteticas", min_value=1, max_value=8, value=3)
     alpha    = st.slider("Intensidad de deformacion (alpha)", min_value=10, max_value=80, value=35,
                          help="10 = deformacion suave | 80 = deformacion agresiva")
@@ -71,7 +74,7 @@ with col_out:
 
             with st.spinner("Ejecutando pipeline (A -> SAM 2 -> Fractal -> Deformacion -> Macenko)..."):
                 try:
-                    comp_path = sp.run(tmp_path, work_dir, n_variants=n_var, alpha=alpha, grade=grade, draw_points=draw_pts)
+                    comp_path = sp.run(tmp_path, work_dir, n_variants=n_var, alpha=alpha, grade=grade, stain_type=stain_key, draw_points=draw_pts)
                     st.success("Pipeline completado.")
                 except Exception as e:
                     st.error(f"Error: {e}")

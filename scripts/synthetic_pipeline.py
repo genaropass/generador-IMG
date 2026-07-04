@@ -26,7 +26,7 @@ warnings.filterwarnings("ignore")
 sys.path.insert(0, os.path.dirname(__file__))
 
 from fractal_field       import build_elastic_field, apply_elastic_deformation, transform_coordinates, lacunarity_color_scale
-from macenko             import separate_stains, augment_staining, reconstruct_from_stains
+from macenko             import separate_stains, augment_staining, reconstruct_from_stains, calibrate_reference, IHC_REFERENCE, HE_REFERENCE
 from fractal_characterizer import compute_fractal_dimension, compute_lacunarity, compute_minkowski_and_zeta
 
 # ─── Constantes configurables ──────────────────────────────────────────────
@@ -178,14 +178,15 @@ def characterize_cells(masks_with_coords):
 # ETAPA D+E: CAMPO ELASTICO + DEFORMACION COMPLETA
 # ==========================================================================
 
-def generate_synthetic_wsi(image_rgb, characterized_cells, variant_idx=0, grade="3+"):
+def generate_synthetic_wsi(image_rgb, characterized_cells, variant_idx=0, grade="3+", stain_type="ihc"):
     """
     Genera UNA variante sintetica de la WSI completa.
     Combina:
-      - Campo elastico fBm + Weierstrass ponderado por D_f  (Etapa D)
-      - cv2.remap sobre imagen completa                     (Etapa E)
-      - Simulacion de gaps locales de membrana (HER2 1+/2+) e intensidad
-      - Augmentacion Macenko global                         (Etapa F)
+      - Mascara de tejido para limitar la deformacion al tejido real (Etapa D)
+      - Campo elastico fBm + Weierstrass ponderado por D_f               (Etapa D)
+      - cv2.remap sobre imagen completa                                  (Etapa E)
+      - Simulacion de gaps locales de membrana (HER2 1+/2+)              (Etapa F)
+      - Calibracion de tincion por tipo (IHC / H&E) + Macenko            (Etapa F)
     Retorna: (imagen_sintetica_rgb, nuevas_coords, dx, dy)
     """
     H, W = image_rgb.shape[:2]
@@ -195,7 +196,12 @@ def generate_synthetic_wsi(image_rgb, characterized_cells, variant_idx=0, grade=
     masks_df = [(c[0], c[3]) for c in characterized_cells]
     coords   = [(c[1], c[2]) for c in characterized_cells]
 
-    # ── Etapa D: Campo elastico ───────────────────────────────────────────
+    # ── Etapa D: Mascara de tejido + Campo elastico ───────────────────────
+    # Detectar pixeles de fondo blanco (no tejido) para no deformarlos
+    gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
+    _, tissue_mask = cv2.threshold(gray, 230, 255, cv2.THRESH_BINARY_INV)
+    tissue_mask = cv2.dilate(tissue_mask, np.ones((15, 15), np.uint8), iterations=2)
+
     map_x, map_y, dx, dy = build_elastic_field(
         H, W,
         masks_df_list=masks_df,
@@ -206,8 +212,12 @@ def generate_synthetic_wsi(image_rgb, characterized_cells, variant_idx=0, grade=
         seed=seed
     )
 
-    # ── Etapa E: Deformacion completa ─────────────────────────────────────
-    warped_rgb = apply_elastic_deformation(image_rgb, map_x, map_y)
+    # ── Etapa E: Deformacion limitada al tejido ───────────────────────────
+    warped_full = apply_elastic_deformation(image_rgb, map_x, map_y)
+    # Componer: usar pixeles deformados solo en la mascara de tejido
+    warped_rgb = image_rgb.copy()
+    m = tissue_mask > 0
+    warped_rgb[m] = warped_full[m]
 
     # ── Simulación de Gaps Locales de Membrana (HER2 0, 1+, 2+) ───────────
     global_gap_mask = np.ones((H, W), dtype=np.float32)
@@ -264,8 +274,10 @@ def generate_synthetic_wsi(image_rgb, characterized_cells, variant_idx=0, grade=
                     if in_gap:
                         global_gap_mask[y, x] = rng.uniform(0.0, 0.15) # Fading fuerte del DAB
 
-    # ── Etapa F: Macenko color + Gaps + Intensidad de Grado HER2 ──────────
-    concentrations, od = separate_stains(warped_rgb)
+    # ── Etapa F: Macenko calibrado por tipo de tincion + Gaps ─────────────
+    # Calibrar la referencia desde la imagen real del usuario
+    stain_ref = calibrate_reference(image_rgb) if stain_type == "ihc" else HE_REFERENCE
+    concentrations, od = separate_stains(warped_rgb, reference=stain_ref)
 
     mean_lac = np.mean([c[4] for c in characterized_cells]) if characterized_cells else 1.5
     h_s, dab_s = lacunarity_color_scale(mean_lac, base_dab_scale=1.0)
@@ -290,8 +302,8 @@ def generate_synthetic_wsi(image_rgb, characterized_cells, variant_idx=0, grade=
     concentrations[:, :, 1] = concentrations[:, :, 1] * dab_scale * global_gap_mask
     concentrations = np.clip(concentrations, 0, None)
 
-    # Reconstrucción de la imagen RGB
-    synthetic_rgb = reconstruct_from_stains(concentrations)
+    # Reconstruccion calibrada
+    synthetic_rgb = reconstruct_from_stains(concentrations, reference=stain_ref)
     synthetic_rgb = np.clip(synthetic_rgb.astype(np.float64) * bright, 0, 255).astype(np.uint8)
 
     # Transformar coordenadas con el mismo campo
@@ -394,7 +406,7 @@ def save_comparison(original_rgb, variants, output_path, base_name):
 # PIPELINE PRINCIPAL
 # ==========================================================================
 
-def run(image_path, output_dir, n_variants=N_VARIANTS, alpha=ALPHA, grade="3+", draw_points=False):
+def run(image_path, output_dir, n_variants=N_VARIANTS, alpha=ALPHA, grade="3+", stain_type="ihc", draw_points=False):
     """
     Ejecuta el pipeline completo A→F sobre una imagen WSI.
     """
@@ -438,7 +450,7 @@ def run(image_path, output_dir, n_variants=N_VARIANTS, alpha=ALPHA, grade="3+", 
     for vi in range(n_variants):
         print(f"  [Etapas D-E-F] Generando variante {vi+1}/{n_variants}...")
         synth_rgb, new_coords, dx, dy = generate_synthetic_wsi(
-            image_rgb, characterized, variant_idx=vi, grade=grade
+            image_rgb, characterized, variant_idx=vi, grade=grade, stain_type=stain_type
         )
 
         sid, img_path = save_variant(
