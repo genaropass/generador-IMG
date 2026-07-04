@@ -371,26 +371,24 @@ def save_variant(output_dir, base_name, variant_idx, synthetic_rgb,
 # COMPARATIVA VISUAL
 # ==========================================================================
 
-def save_comparison(original_rgb, variants, output_path, base_name):
+def save_comparison(original_rgb, variants, output_path, base_name, draw_points=False):
     """
     Genera collage comparativo: original + N variantes.
-    Muestra los puntos de celulas sobre cada imagen.
     """
     n = len(variants) + 1
     fig, axes = plt.subplots(1, n, figsize=(6 * n, 6))
     if n == 1:
         axes = [axes]
 
-    # Original con puntos
     axes[0].imshow(original_rgb)
     axes[0].set_title("Original", fontsize=12, fontweight='bold')
     axes[0].axis("off")
 
     for i, (synth_rgb, new_coords, info) in enumerate(variants):
         axes[i + 1].imshow(synth_rgb)
-        # Pintar los puntos actualizados
-        for (x, y) in new_coords:
-            axes[i + 1].plot(x, y, 'o', color='#00FF88', markersize=3, alpha=0.7)
+        if draw_points:
+            for (x, y) in new_coords:
+                axes[i + 1].plot(x, y, 'o', color='#00FF88', markersize=3, alpha=0.7)
         title = f"Sintetica {i+1}\nalpha={info['alpha']}  seed={info['seed']}"
         axes[i + 1].set_title(title, fontsize=10)
         axes[i + 1].axis("off")
@@ -461,7 +459,7 @@ def run(image_path, output_dir, n_variants=N_VARIANTS, alpha=ALPHA, grade="3+", 
 
     # Comparativa visual
     comp_path = os.path.join(output_dir, f"{base_name}_comparativa.png")
-    save_comparison(image_rgb, variants_info, comp_path, base_name)
+    save_comparison(image_rgb, variants_info, comp_path, base_name, draw_points=draw_points)
 
     print(f"\n{'='*60}")
     print(f"  Pipeline completado.")
