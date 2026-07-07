@@ -8,3 +8,4 @@ ultralytics>=8.1.0
 scikit-image>=0.19.3
 torch
 torchvision
+tqdm
